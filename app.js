@@ -4,16 +4,10 @@ import { Chess } from 'chess.js';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { error } from 'console';
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const chess = new Chess();
-
-let players = {};
-let currentPlayer = "w";
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -24,50 +18,78 @@ app.get('/', (_, res) => {
     res.render('index');
 });
 
+let rooms = {};
 
-io.on("connection", (socket) => {
-    console.log("New connection");
-    if (!players.white) {
-        players.white = socket.id;
-        socket.emit("playerRole", "w");
-    } else if (!players.black) {
-        players.black = socket.id;
-        socket.emit("playerRole", "b");
-    } else {
-        socket.emit("spectatorRole");
-    }
+io.on('connection', (socket) => {
+    console.log('New connection:', socket.id);
 
-    socket.on("disconnect", () => {
-        if (players.white === socket.id) {
-            delete players.white;
+    socket.on('joinRoom', (room) => {
+        if (!rooms[room]) {
+            rooms[room] = {
+                players: [],
+                spectators: [],
+                chess: new Chess(),
+            };
         }
-        else if (players.black === socket.id) {
-            delete players.black;
+
+        const roomData = rooms[room];
+
+        if (roomData.players.length < 2) {
+            roomData.players.push(socket.id);
+            const role = roomData.players.length === 1 ? 'w' : 'b';
+            socket.join(room);
+            socket.emit('playerRole', role);
+        } else {
+            roomData.spectators.push(socket.id);
+            socket.join(room);
+            socket.emit('spectatorRole');
         }
-    })
 
-    socket.on("move", (move) => {
-        try {
-            if (chess.turn() === 'w' && players.white !== socket.id) return;
-            if (chess.turn() === 'b' && players.black !== socket.id) return;
+        socket.emit('boardState', roomData.chess.fen());
+    });
 
-            const result = chess.move(move);
-            if (!result) {
-                console.log("Invalid move", move);
-                socket.emit("invalidMove", move);
-                throw new error(result)
+    socket.on('move', (data) => {
+        const { room, move } = data;
+        const roomData = rooms[room];
+
+        if (!roomData) return;
+
+        const chess = roomData.chess;
+
+        const currentPlayer = chess.turn();
+        const playerIndex = roomData.players.indexOf(socket.id);
+        const isValidPlayer =
+            (currentPlayer === 'w' && playerIndex === 0) ||
+            (currentPlayer === 'b' && playerIndex === 1);
+
+        if (!isValidPlayer) return;
+
+        const result = chess.move(move);
+        if (!result) {
+            socket.emit('invalidMove', move);
+            return;
+        }
+
+        io.to(room).emit('move', move);
+        io.to(room).emit('boardState', chess.fen());
+    });
+
+    socket.on('disconnect', () => {
+        for (const room of Object.keys(rooms)) {
+            const roomData = rooms[room];
+
+            if (roomData.players.includes(socket.id)) {
+                roomData.players = roomData.players.filter((id) => id !== socket.id);
+            } else if (roomData.spectators.includes(socket.id)) {
+                roomData.spectators = roomData.spectators.filter((id) => id !== socket.id);
             }
-            currentPlayer = chess.turn();
-            io.emit("move", move);
-            io.emit("boardState", chess.fen());
-        } catch (error) {
-            console.log("Error while moving pieces", error);
-            socket.emit("InvalidMove", move);
+            if (roomData.players.length === 0 && roomData.spectators.length === 0) {
+                delete rooms[room];
+            }
         }
-    })
+    });
 });
 
-
-server.listen(3000, () => {
-    console.log('Server is running on http://localhost:3000');
+server.listen(4000, () => {
+    console.log('Server is running on http://localhost:4000');
 });
